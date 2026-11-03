@@ -1,0 +1,29 @@
+# Wasp Destroyer 9000 — host-side settings.
+# Secrets (API keys) live in .env, never here.
+
+camera:
+  # ESP32 MJPEG stream. /Test on port 80 is the factory firmware's stream
+  # handler and is verified on our robot; port 81 /stream refuses connections
+  # (see docs/hardware.md). Can also be a video/image file or webcam index (0).
+  source: http://192.168.4.1/Test
+  timeout_s: 5
+  reconnect_delay_s: 1
+  loop_video_files: true
+
+inference:
+  # One of: cloud | local | mock
+  #   cloud: Roboflow hosted API (needs internet)
+  #   local: Roboflow Inference server in Docker (see README)
+  #   mock:  fake detections, no network or key needed
+  backend: local
+  model_id: wasps-nest/1
+  cloud_url: https://serverless.roboflow.com
+  local_url: http://localhost:9001
+  # Detections below this confidence are discarded.
+  confidence_threshold: 0.4
+
+viewer:
+  # Hide boxes once the latest detection is older than this (seconds).
+  detection_stale_s: 2.0
+  # Minimum pause between inference requests (0 = back-to-back).
+  inference_interval_s: 0

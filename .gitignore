@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Outputs
+output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vendor package (large, ELEGOO copyright) — keep locally, do not commit
+ELEGOO Conqueror Robot Tank Kit*/
