@@ -27,3 +27,16 @@ viewer:
   detection_stale_s: 2.0
   # Minimum pause between inference requests (0 = back-to-back).
   inference_interval_s: 0
+
+robot:
+  # ESP32 factory command server (raw TCP, JSON). See docs/hardware.md.
+  host: 192.168.4.1
+  command_port: 100
+  connect_timeout_s: 5
+  reply_timeout_s: 2
+  # Treat the link as lost if the robot's 1 Hz heartbeat stops this long. Only
+  # applies once a heartbeat has been seen: our robot's ESP32 sends none.
+  link_timeout_s: 3.5
+  # Drive commands are refused while false. Leave it false until the drivetrain
+  # is assembled and the stop path has been verified on the real robot.
+  motion_enabled: false

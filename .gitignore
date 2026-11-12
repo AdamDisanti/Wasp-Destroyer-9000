@@ -17,3 +17,6 @@ Thumbs.db
 
 # Vendor package (large, ELEGOO copyright) — keep locally, do not commit
 ELEGOO Conqueror Robot Tank Kit*/
+
+# Backups of the factory UNO firmware (ELEGOO copyright)
+firmware/backup/

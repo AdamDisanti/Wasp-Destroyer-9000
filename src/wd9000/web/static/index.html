@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WD9000 Control</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2026; --muted: #5d6573; --border: #d9dde3;
+    --accent: #2563eb; --ok: #15803d; --warn: #b45309; --err: #b91c1c;
+    --spray: #dc2626; --spray-active: #7f1d1d; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121418; --panel: #1b1e24; --text: #e7e9ee; --muted: #9aa3b2; --border: #2d323b;
+      --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+      --spray: #ef4444; --spray-active: #991b1b; --chip: #262a32;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 24px; padding: 12px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; }
+  nav { display: flex; gap: 4px; }
+  nav button { border: 0; background: none; color: var(--muted); font: inherit; font-weight: 600;
+               padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+  nav button[aria-selected="true"] { background: var(--chip); color: var(--text); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  .tab[hidden] { display: none; }
+  .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .panel h2 { font-size: 15px; margin: 0 0 12px; }
+  .panel p.hint { color: var(--muted); margin: 0 0 12px; font-size: 14px; }
+  .video { width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; object-fit: contain; display: block; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-weight: 500;
+            border: 1px solid currentColor; }
+  .banner[hidden] { display: none; }
+  .statusbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 6px 12px; font-weight: 600; font-size: 14px; }
+  .stack { display: grid; gap: 16px; }
+  .spray-btn { width: 100%; min-height: 150px; border: 0; border-radius: 14px; background: var(--spray);
+               color: #fff; font: 700 24px/1.2 inherit; cursor: pointer; touch-action: none;
+               user-select: none; -webkit-user-select: none; }
+  .spray-btn.active { background: var(--spray-active); }
+  .spray-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .spray-btn small { display: block; font-size: 14px; font-weight: 500; opacity: 0.85; margin-top: 6px; }
+  button.btn { border: 1px solid var(--border); background: var(--chip); color: var(--text); font: 600 14px inherit;
+               padding: 10px 14px; border-radius: 8px; cursor: pointer; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn.stop { background: var(--text); color: var(--bg); width: 100%; padding: 14px; font-size: 16px; margin-top: 10px; }
+  button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .slider { display: grid; grid-template-columns: 7.5em 1fr 3.5em; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .slider output { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px;
+           margin: -6px 3.5em 12px 8.4em; }
+  input[type=number] { width: 6.5em; padding: 8px; border: 1px solid var(--border); border-radius: 8px;
+                       background: var(--bg); color: var(--text); font: inherit; }
+  label.check { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .saved { display: grid; grid-template-columns: auto auto; gap: 4px 16px; justify-content: start;
+           margin: 12px 0; font-variant-numeric: tabular-nums; }
+  .saved span:nth-child(odd) { color: var(--muted); }
+  .msg { min-height: 1.4em; margin-top: 10px; font-size: 14px; }
+  ol { margin: 0; padding-left: 20px; } ol li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wasp Destroyer 9000</h1>
+  <nav role="tablist">
+    <button role="tab" data-tab="camera" aria-selected="true">Camera</button>
+    <button role="tab" data-tab="spray" aria-selected="false">Spray test</button>
+  </nav>
+</header>
+
+<main>
+  <!-- Camera ---------------------------------------------------------------->
+  <section class="tab" id="tab-camera">
+    <div class="grid">
+      <div class="panel"><img id="video" class="video" alt="Live camera"></div>
+      <div class="panel">
+        <h2>Camera</h2>
+        <dl>
+          <dt>Status</dt><dd id="cam-status">–</dd>
+          <dt>Frame rate</dt><dd id="cam-fps">–</dd>
+          <dt>Source</dt><dd id="cam-source">–</dd>
+        </dl>
+        <p class="msg err" id="cam-error"></p>
+        <h2>Nest detection</h2>
+        <label class="check"><input type="checkbox" id="det-enabled"> Show detection boxes</label>
+        <dl>
+          <dt>Model</dt><dd id="det-backend">–</dd>
+          <dt>Speed</dt><dd id="det-fps">–</dd>
+          <dt>Found</dt><dd id="det-list">–</dd>
+        </dl>
+        <p class="msg err" id="det-error"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Spray test ------------------------------------------------------------>
+  <section class="tab" id="tab-spray" hidden>
+    <div class="banner err" id="robot-banner" hidden></div>
+    <div class="banner warn" id="boot-banner" hidden></div>
+    <div class="statusbar">
+      <span class="chip" id="chip-link">Robot: –</span>
+      <span class="chip" id="chip-state">State: –</span>
+      <span class="chip" id="chip-pos">Servos: –</span>
+      <span class="chip" id="chip-power" title="Lowest values since the last update, measured by the UNO">Power: –</span>
+    </div>
+
+    <div class="grid">
+      <div class="stack">
+        <div class="panel">
+          <h2>Spray</h2>
+          <button class="spray-btn" id="hold-btn" disabled>HOLD TO SPRAY
+            <small>Press and hold. Let go to stop.</small></button>
+          <button class="btn stop" id="release-btn">Stop / release</button>
+          <p class="msg" id="spray-msg"></p>
+        </div>
+
+        <div class="panel">
+          <h2>Timed press</h2>
+          <p class="hint">One press of an exact length, so tests are repeatable.</p>
+          <div class="row">
+            <input type="number" id="press-ms" min="50" max="2000" step="50" value="300"> ms
+            <button class="btn primary" id="press-btn" disabled>Press once</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Servo positions</h2>
+          <p class="hint">90 = horns level (rest). Toward 0 = pressing the nozzle.
+            Moving a slider moves the servos right away but doesn't spray by itself.</p>
+          <label class="check"><input type="checkbox" id="linked" checked> Move both servos together</label>
+          <div class="slider"><label for="s1">Servo 1 (left)</label>
+            <input type="range" id="s1" min="0" max="180" step="1" value="90"><output id="s1-val">90</output></div>
+          <div class="slider"><label for="s2">Servo 2 (right)</label>
+            <input type="range" id="s2" min="0" max="180" step="1" value="90"><output id="s2-val">90</output></div>
+          <div class="scale"><span>0 press</span><span>90 rest</span><span>180</span></div>
+          <div class="row">
+            <button class="btn" data-goto="rest">Go to rest</button>
+            <button class="btn" data-goto="press">Go to press</button>
+            <button class="btn" data-save="rest">Save as rest</button>
+            <button class="btn" data-save="press">Save as press</button>
+          </div>
+          <div class="saved">
+            <span>Saved rest</span><span id="saved-rest">–</span>
+            <span>Saved press</span><span id="saved-press">–</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="panel">
+          <h2>How to test</h2>
+          <ol>
+            <li>Take the can out. Click <b>Go to rest</b>, then <b>Go to press</b> and check the horns' path.</li>
+            <li>Adjust the sliders until the horns just push the nozzle down, then <b>Save as press</b>.</li>
+            <li>Put the can in with the separate servo power connected.</li>
+            <li>Try a <b>Timed press</b> of 300 ms on a covered nozzle, then outdoors.</li>
+            <li>Use <b>Hold to spray</b> for longer bursts. It always stops after the max time.</li>
+          </ol>
+        </div>
+
+        <div class="panel">
+          <h2>Settings</h2>
+          <div class="slider" style="grid-template-columns: 9em 1fr;">
+            <label for="max-ms">Max press time</label>
+            <span><input type="number" id="max-ms" min="100" max="30000" step="100"> ms</span>
+          </div>
+          <div class="slider" style="grid-template-columns: 9em 1fr;">
+            <label for="speed">Move speed</label>
+            <span><input type="number" id="speed" min="0" max="1000" step="10"> °/s</span>
+          </div>
+          <p class="hint">Speed 0 = as fast as possible. Settings are stored on the robot.</p>
+          <button class="btn primary" id="settings-btn">Apply</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const HOLD_INTERVAL_MS = 150;  // the firmware releases if it hears nothing for 500 ms
+
+// --- helpers -------------------------------------------------------------------
+async function getJSON(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  return r.json();
+}
+async function post(url, body = {}) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                               body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function setText(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  if (cls !== undefined) el.className = cls;
+}
+
+// --- tabs ----------------------------------------------------------------------
+let activeTab = "camera";
+function showTab(name) {
+  activeTab = name;
+  document.querySelectorAll("nav button").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === name));
+  document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + name));
+  if (name === "camera") frameLoop();  // stops by itself when the tab changes
+  if (name !== "spray") stopHold();
+  history.replaceState(null, "", "#" + name);
+  refresh();
+}
+document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+// --- camera tab ----------------------------------------------------------------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Fetch one frame at a time while the camera tab is visible. Unlike a long-lived
+// MJPEG stream, this picks up again by itself after the server restarts.
+let frameLoopRunning = false;
+async function frameLoop() {
+  if (frameLoopRunning) return;
+  frameLoopRunning = true;
+  let key = "", shownUrl = null;
+  while (activeTab === "camera" && !document.hidden) {
+    try {
+      const r = await fetch("/frame.jpg?after=" + encodeURIComponent(key), { cache: "no-store" });
+      if (r.status === 200) {
+        key = r.headers.get("X-Frame-Key") || "";
+        const url = URL.createObjectURL(await r.blob());
+        $("video").src = url;
+        if (shownUrl) URL.revokeObjectURL(shownUrl);
+        shownUrl = url;
+      } else if (r.status !== 204) {
+        await sleep(500);
+      }
+    } catch (e) {
+      await sleep(1000);  // server restarting
+    }
+  }
+  frameLoopRunning = false;
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && activeTab === "camera") frameLoop(); });
+async function refreshCamera() {
+  const s = await getJSON("/api/camera");
+  setText("cam-status", s.status, s.status === "streaming" ? "ok" : "warn");
+  setText("cam-fps", `${s.fps} fps` + (s.frame_age_s > 1 ? ` (last frame ${s.frame_age_s} s ago)` : ""));
+  setText("cam-source", s.source);
+  setText("cam-error", s.error || "");
+  const d = s.detection;
+  $("det-enabled").disabled = !d;
+  if (!d) {
+    setText("det-backend", "off");
+    return;
+  }
+  $("det-enabled").checked = d.enabled;
+  setText("det-backend", d.backend);
+  setText("det-fps", d.enabled ? `${d.fps} fps` + (d.latency_ms != null ? `, ${d.latency_ms} ms delay` : "") : "paused");
+  setText("det-list", d.detections.length
+    ? d.detections.map((x) => `${x.label} ${Math.round(x.confidence * 100)}%`).join(", ") : "nothing");
+  setText("det-error", d.error || "");
+}
+$("det-enabled").addEventListener("change", (e) => post("/api/camera/detect", { enabled: e.target.checked }));
+
+// --- spray tab -----------------------------------------------------------------
+let status = null;
+let firstBoot = null;
+let dragging = false;
+
+function setControlsEnabled(on) {
+  ["hold-btn", "press-btn"].forEach((id) => ($(id).disabled = !on));
+}
+
+function showStatus(s) {
+  status = s;
+  setText("chip-link", "Robot: connected", "chip ok");
+  const stateNames = { REST: "Rest", PRESS: "PRESSING", MANUAL: "Manual position" };
+  setText("chip-state", "State: " + (stateNames[s.st] || s.st), "chip" + (s.st === "PRESS" ? " err" : ""));
+  setText("chip-pos", `Servos: ${s.pos[0]}° / ${s.pos[1]}°`);
+  if (s.vmin !== undefined) {
+    const v = (mv) => (mv / 1000).toFixed(2) + " V";
+    const bad = s.vmin < 4500 || s.bmin < 7000;
+    setText("chip-power", `5 V rail ${v(s.vcc)} (low ${v(s.vmin)}) · Battery ${v(s.bat)} (low ${v(s.bmin)})`,
+            "chip" + (bad ? " err" : ""));
+  }
+  setText("saved-rest", `${s.rest[0]}° / ${s.rest[1]}°`);
+  setText("saved-press", `${s.press[0]}° / ${s.press[1]}°`);
+  if (!dragging) {
+    $("s1").value = s.pos[0]; $("s1-val").textContent = s.pos[0];
+    $("s2").value = s.pos[1]; $("s2-val").textContent = s.pos[1];
+  }
+  if (document.activeElement !== $("max-ms")) $("max-ms").value = s.max;
+  if (document.activeElement !== $("speed")) $("speed").value = s.spd;
+  $("press-ms").max = s.max;
+  if (firstBoot === null) firstBoot = s.boot;
+  const banner = $("boot-banner");
+  banner.hidden = s.boot === firstBoot;
+  banner.textContent = `The robot's board restarted ${s.boot - firstBoot} time(s) since this page opened. ` +
+    "The servos are probably drawing too much power: use the separate servo supply.";
+  $("robot-banner").hidden = true;
+  setControlsEnabled(true);
+}
+
+function showRobotError(message) {
+  setText("chip-link", "Robot: not connected", "chip err");
+  setText("chip-state", "State: unknown", "chip");
+  setText("chip-pos", "Servos: unknown", "chip");
+  setText("chip-power", "Power: unknown", "chip");
+  $("robot-banner").hidden = false;
+  $("robot-banner").textContent = message;
+  setControlsEnabled(false);
+}
+
+async function refreshSpray() {
+  if (holding) return;
+  const r = await getJSON("/api/spray");
+  if (r.status) showStatus(r.status); else showRobotError(r.error);
+}
+
+async function sprayAction(action, body = {}) {
+  try {
+    const r = await post("/api/spray/" + action, body);
+    if (r.status) showStatus(r.status);
+    return r;
+  } catch (e) {
+    setText("spray-msg", e.message, "msg err");
+    throw e;
+  }
+}
+
+// Hold to spray: resend "hold" while the button is held. If the page, browser or
+// Wi-Fi stops, the resends stop and the robot releases on its own.
+let holding = false, holdTimer = null, holdInFlight = null;
+function sendHold() {
+  if (!holding || holdInFlight) return;
+  holdInFlight = post("/api/spray/hold")
+    .then((r) => {
+      if (r.value === "capped") {
+        stopHold();
+        setText("spray-msg", `Stopped at the max press time (${status ? status.max : "?"} ms). Let go and press again.`, "msg warn");
+      }
+    })
+    .catch((e) => { stopHold(); setText("spray-msg", e.message, "msg err"); })
+    .finally(() => (holdInFlight = null));
+}
+function startHold(e) {
+  if ($("hold-btn").disabled || holding) return;
+  e.preventDefault();
+  if (e.pointerId !== undefined) $("hold-btn").setPointerCapture(e.pointerId);
+  holding = true;
+  $("hold-btn").classList.add("active");
+  setText("spray-msg", "Spraying…", "msg warn");
+  setText("chip-state", "State: PRESSING", "chip err");
+  sendHold();
+  holdTimer = setInterval(sendHold, HOLD_INTERVAL_MS);
+}
+async function stopHold() {
+  if (!holding) return;
+  holding = false;
+  clearInterval(holdTimer);
+  $("hold-btn").classList.remove("active");
+  if (holdInFlight) await holdInFlight.catch(() => {});  // make the release arrive last
+  try {
+    await sprayAction("release");
+    if ($("spray-msg").classList.contains("warn") && $("spray-msg").textContent === "Spraying…") setText("spray-msg", "");
+  } catch (e) { /* message already shown */ }
+}
+const holdBtn = $("hold-btn");
+holdBtn.addEventListener("pointerdown", startHold);
+["pointerup", "pointercancel", "lostpointercapture"].forEach((ev) => holdBtn.addEventListener(ev, stopHold));
+holdBtn.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && !e.repeat) startHold(e); });
+holdBtn.addEventListener("keyup", (e) => { if (e.key === " " || e.key === "Enter") stopHold(); });
+holdBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+window.addEventListener("blur", stopHold);
+document.addEventListener("visibilitychange", () => { if (document.hidden) stopHold(); });
+
+$("release-btn").addEventListener("click", async () => {
+  await stopHold();
+  sprayAction("release").then(() => setText("spray-msg", "Released.", "msg")).catch(() => {});
+});
+
+$("press-btn").addEventListener("click", async () => {
+  const ms = parseInt($("press-ms").value, 10);
+  const max = status ? status.max : 2000;
+  if (!(ms >= 50 && ms <= max)) {
+    setText("spray-msg", `Press time must be 50–${max} ms (raise the max in Settings).`, "msg err");
+    return;
+  }
+  $("press-btn").disabled = true;
+  try {
+    await sprayAction("press", { ms });
+    setText("spray-msg", `Pressing for ${ms} ms…`, "msg warn");
+    await new Promise((r) => setTimeout(r, ms + 150));
+    setText("spray-msg", `Pressed for ${ms} ms.`, "msg");
+    refreshSpray();
+  } catch (e) { /* shown */ } finally { $("press-btn").disabled = false; }
+});
+
+// Sliders: send the position while dragging (throttled), and once more on release.
+let jogTimer = null;
+function jogNow() {
+  jogTimer = null;
+  const a = parseInt($("s1").value, 10), b = parseInt($("s2").value, 10);
+  const calls = a === b ? [sprayAction("jog", { servo: 3, angle: a })]
+    : [sprayAction("jog", { servo: 1, angle: a }), sprayAction("jog", { servo: 2, angle: b })];
+  Promise.all(calls).catch(() => {});
+}
+function onSlider(e) {
+  dragging = true;
+  const v = e.target.value;
+  if ($("linked").checked) { $("s1").value = v; $("s2").value = v; }
+  $("s1-val").textContent = $("s1").value;
+  $("s2-val").textContent = $("s2").value;
+  if (!jogTimer) jogTimer = setTimeout(jogNow, 120);
+}
+["s1", "s2"].forEach((id) => {
+  $(id).addEventListener("input", onSlider);
+  $(id).addEventListener("change", () => { dragging = false; clearTimeout(jogTimer); jogNow(); });
+});
+
+document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () =>
+  sprayAction("goto", { pose: b.dataset.goto }).then(() => setText("spray-msg", "")).catch(() => {})));
+document.querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", () => {
+  const pose = b.dataset.save;
+  const [a, c] = [$("s1").value, $("s2").value];
+  if (!confirm(`Save the current position (${a}° / ${c}°) as the ${pose} position?`)) return;
+  sprayAction("save", { pose }).then(() => setText("spray-msg", `Saved ${pose} position.`, "msg ok")).catch(() => {});
+}));
+
+$("settings-btn").addEventListener("click", () => {
+  const max_ms = parseInt($("max-ms").value, 10), speed = parseInt($("speed").value, 10);
+  sprayAction("settings", { max_ms, speed }).then(() => setText("spray-msg", "Settings saved.", "msg ok")).catch(() => {});
+});
+
+// --- polling -------------------------------------------------------------------
+let refreshing = false;
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    if (activeTab === "camera") await refreshCamera(); else await refreshSpray();
+  } catch (e) {
+    if (activeTab === "spray") showRobotError("Lost contact with the web server. Is it still running?");
+    else setText("cam-status", "web app not running (start python -m wd9000.web)", "err");
+  } finally {
+    refreshing = false;
+  }
+}
+setInterval(refresh, 1000);
+showTab(location.hash === "#spray" ? "spray" : "camera");
+</script>
+</body>
+</html>
