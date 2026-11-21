@@ -97,7 +97,8 @@ Saved poses and settings are kept in EEPROM.
 - Every press is capped at `max` ms (default 2000).
 - `on` holds only while the Mac keeps resending (500 ms lease). If the console
   crashes or Wi-Fi drops, the press releases on its own.
-- On disconnect the ESP32 sends `{"N":100}`, which releases. So do Ctrl+C and `quit`.
+- Ctrl+C and `quit` send `{"N":100}`, which releases. Our ESP32 does **not**
+  send it when a client disconnects (see `docs/hardware.md`); the lease covers that.
 - A hold that hits `max` stays released until you send `off`.
 - The shield's MODE button toggles press/release (still capped).
 

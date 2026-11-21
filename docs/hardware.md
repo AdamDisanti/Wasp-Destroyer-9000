@@ -144,6 +144,7 @@ operation so the UNO hears the ESP32. Set it to **upload** only when flashing th
   - two separate `Servo` objects on A0/A1, always attached, so they hold position
   - short release timer: `D1:1` presses for ~500 ms. The host resends it while
     the operator holds the spray key; the firmware releases when resends stop
-  - hard cap on spray duration; `{"N":100}` (stop, also sent by the ESP32 when
-    the link drops) releases immediately
+  - hard cap on spray duration; `{"N":100}` (stop) releases immediately. Our
+    ESP32 doesn't send it when the link drops, so drive commands in the combined
+    firmware need the same kind of timeout
   - spray is always operator-triggered. Detections only highlight the target
