@@ -70,6 +70,12 @@
   .saved span:nth-child(odd) { color: var(--muted); }
   .msg { min-height: 1.4em; margin-top: 10px; font-size: 14px; }
   ol { margin: 0; padding-left: 20px; } ol li { margin-bottom: 4px; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }
+  .dpad button { min-height: 56px; font-size: 22px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .dpad button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .dpad .stopkey { background: var(--text); color: var(--bg); font-size: 15px; }
+  details summary { cursor: pointer; font-weight: 600; margin-top: 12px; }
+  details[open] summary { margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -86,6 +92,7 @@
   <section class="tab" id="tab-camera">
     <div class="grid">
       <div class="panel"><img id="video" class="video" alt="Live camera"></div>
+      <div class="stack">
       <div class="panel">
         <h2>Camera</h2>
         <dl>
@@ -102,6 +109,51 @@
           <dt>Found</dt><dd id="det-list">–</dd>
         </dl>
         <p class="msg err" id="det-error"></p>
+      </div>
+      <div class="panel" id="drive-panel">
+        <h2>Drive</h2>
+        <p class="hint" id="drive-off">Driving is off. To drive, restart the web app with
+          <code>python -m wd9000.web --drive</code></p>
+        <div id="drive-on" hidden>
+          <p class="hint">Hold <b>W A S D</b> or the arrow keys (or the buttons). Let go to stop.
+            <b>Space</b> stops. The robot also stops by itself if this page or the Wi-Fi goes away.</p>
+          <div class="dpad">
+            <span></span><button class="btn" data-drive="up" title="Forward (W)">▲</button><span></span>
+            <button class="btn" data-drive="left" title="Turn left (A)">◀</button>
+            <button class="btn stopkey" id="drive-stop">STOP</button>
+            <button class="btn" data-drive="right" title="Turn right (D)">▶</button>
+            <span></span><button class="btn" data-drive="down" title="Backward (S)">▼</button><span></span>
+          </div>
+          <div class="slider" style="grid-template-columns: 5em 1fr 3em;">
+            <label for="drive-speed">Speed</label>
+            <input type="range" id="drive-speed" min="40" max="255" step="5" value="120">
+            <output id="drive-speed-val">120</output>
+          </div>
+          <dl>
+            <dt>Robot</dt><dd id="drive-link">–</dd>
+            <dt>Tracks</dt><dd id="drive-tracks">–</dd>
+            <dt>Power</dt><dd id="drive-power">–</dd>
+          </dl>
+          <p class="msg" id="drive-msg"></p>
+          <details>
+            <summary>Track setup</summary>
+            <p class="hint">Lift the tracks off the ground first. Hold a test button: that track
+              should turn so the robot would go <b>forward</b>. Fix it below if not.</p>
+            <div class="row" style="margin-bottom: 12px;">
+              <button class="btn" data-drive-test="left">Test left track</button>
+              <button class="btn" data-drive-test="right">Test right track</button>
+            </div>
+            <label class="check"><input type="checkbox" id="drive-swap"> Swap sides (the other track moves)</label>
+            <label class="check"><input type="checkbox" id="drive-inv-left"> Reverse left track</label>
+            <label class="check"><input type="checkbox" id="drive-inv-right"> Reverse right track</label>
+            <div class="row" style="margin-bottom: 12px;">
+              <label for="drive-max">Top speed limit</label>
+              <input type="number" id="drive-max" min="0" max="255" step="5"> <span>/ 255</span>
+            </div>
+            <button class="btn primary" id="drive-settings-btn">Apply</button>
+          </details>
+        </div>
+      </div>
       </div>
     </div>
   </section>
@@ -220,6 +272,7 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== "tab-" + name));
   if (name === "camera") frameLoop();  // stops by itself when the tab changes
   if (name !== "spray") stopHold();
+  if (name !== "camera") stopDrive();
   history.replaceState(null, "", "#" + name);
   refresh();
 }
@@ -274,6 +327,135 @@ async function refreshCamera() {
   setText("det-error", d.error || "");
 }
 $("det-enabled").addEventListener("change", (e) => post("/api/camera/detect", { enabled: e.target.checked }));
+
+// --- driving (camera tab) ------------------------------------------------------
+// While a direction is held, resend the track speeds every DRIVE_INTERVAL_MS. The
+// firmware stops the tracks if it hears nothing for 500 ms, so a closed page,
+// crashed browser or dropped Wi-Fi stops the robot.
+const DRIVE_INTERVAL_MS = 150;
+const DRIVE_KEYS = { w: "up", arrowup: "up", s: "down", arrowdown: "down",
+                     a: "left", arrowleft: "left", d: "right", arrowright: "right" };
+let driveEnabled = false;
+const held = new Set();  // "up" | "down" | "left" | "right" | "test-left" | "test-right"
+let driveTimer = null, driveInFlight = null, lastDrive = [0, 0];
+
+function driveCommand() {
+  const s = parseInt($("drive-speed").value, 10);
+  if (held.has("test-left")) return [s, 0];
+  if (held.has("test-right")) return [0, s];
+  const fwd = held.has("up") - held.has("down"), turn = held.has("right") - held.has("left");
+  if (fwd === 0) return [turn * s, -turn * s];  // spin in place
+  const slow = Math.round(fwd * s * 0.4);       // curve: the inside track runs slower
+  return [turn < 0 ? slow : fwd * s, turn > 0 ? slow : fwd * s];
+}
+function showDriveButtons() {
+  document.querySelectorAll("[data-drive]").forEach((b) => b.classList.toggle("active", held.has(b.dataset.drive)));
+}
+function sendDrive() {
+  if (driveInFlight) return;
+  const [left, right] = driveCommand();
+  if (left === 0 && right === 0) return;
+  lastDrive = [left, right];
+  driveInFlight = post("/api/drive/move", { left, right })
+    .then(() => setText("drive-msg", `Driving: left ${left}, right ${right}`, "msg warn"))
+    .catch((e) => { held.clear(); stopDrive(); setText("drive-msg", e.message, "msg err"); })
+    .finally(() => (driveInFlight = null));
+}
+function driveChanged() {
+  showDriveButtons();
+  const [left, right] = driveCommand();
+  if (left === 0 && right === 0) { stopDrive(); return; }
+  if (!driveTimer) driveTimer = setInterval(sendDrive, DRIVE_INTERVAL_MS);
+  if (left !== lastDrive[0] || right !== lastDrive[1]) sendDrive();
+}
+async function stopDrive() {
+  held.clear();
+  showDriveButtons();
+  const wasDriving = driveTimer !== null;
+  clearInterval(driveTimer);
+  driveTimer = null;
+  lastDrive = [0, 0];
+  if (!driveEnabled) return;
+  if (driveInFlight) await driveInFlight.catch(() => {});  // make the stop arrive last
+  try {
+    await post("/api/drive/stop");
+    if (wasDriving) setText("drive-msg", "Stopped.", "msg");
+  } catch (e) { setText("drive-msg", e.message, "msg err"); }
+}
+function typing() {
+  const el = document.activeElement;
+  return el && (el.tagName === "INPUT" && el.type !== "range" && el.type !== "checkbox" || el.tagName === "TEXTAREA");
+}
+document.addEventListener("keydown", (e) => {
+  if (activeTab !== "camera" || !driveEnabled || typing() || e.metaKey || e.ctrlKey) return;
+  const key = e.key.toLowerCase();
+  if (key === " ") { e.preventDefault(); stopDrive(); return; }
+  const dir = DRIVE_KEYS[key];
+  if (!dir) return;
+  e.preventDefault();
+  if (e.repeat || held.has(dir)) return;
+  held.add(dir);
+  driveChanged();
+});
+document.addEventListener("keyup", (e) => {
+  const dir = DRIVE_KEYS[e.key.toLowerCase()];
+  if (dir && held.delete(dir)) driveChanged();
+});
+function holdable(button, name) {
+  button.addEventListener("pointerdown", (e) => {
+    if (!driveEnabled) return;
+    e.preventDefault();
+    button.setPointerCapture(e.pointerId);
+    held.add(name);
+    driveChanged();
+  });
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach((ev) =>
+    button.addEventListener(ev, () => { if (held.delete(name)) driveChanged(); }));
+  button.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+document.querySelectorAll("[data-drive]").forEach((b) => holdable(b, b.dataset.drive));
+document.querySelectorAll("[data-drive-test]").forEach((b) => holdable(b, "test-" + b.dataset.driveTest));
+$("drive-stop").addEventListener("click", stopDrive);
+window.addEventListener("blur", stopDrive);
+document.addEventListener("visibilitychange", () => { if (document.hidden) stopDrive(); });
+$("drive-speed").addEventListener("input", (e) => {
+  $("drive-speed-val").textContent = e.target.value;
+  if (driveTimer) driveChanged();
+});
+$("drive-settings-btn").addEventListener("click", () => {
+  const body = { swap: $("drive-swap").checked, invert_left: $("drive-inv-left").checked,
+                 invert_right: $("drive-inv-right").checked, max: parseInt($("drive-max").value, 10) };
+  post("/api/drive/settings", body).then((r) => { showDriveStatus(r.status); setText("drive-msg", "Track setup saved.", "msg ok"); })
+    .catch((e) => setText("drive-msg", e.message, "msg err"));
+});
+
+let driveSettingsShown = false;
+function showDriveStatus(s) {
+  setText("drive-link", "connected", "ok");
+  setText("drive-tracks", s.drv ? `left ${s.drv[0]}, right ${s.drv[1]} (limit ${s.dmax})`
+    : "no drive support. Upload the latest firmware/servo_spray_test", s.drv ? "" : "err");
+  if (s.vmin !== undefined) {
+    const v = (mv) => (mv / 1000).toFixed(2) + " V";
+    setText("drive-power", `5 V ${v(s.vcc)} (low ${v(s.vmin)}) · battery ${v(s.bat)} (low ${v(s.bmin)})`,
+            s.vmin < 4500 || s.bmin < 7000 ? "err" : "");
+  }
+  if (s.drv && !driveSettingsShown) {  // fill the setup form once, so it doesn't fight the user's edits
+    driveSettingsShown = true;
+    $("drive-swap").checked = !!s.dswap;
+    $("drive-inv-left").checked = !!s.dinv[0];
+    $("drive-inv-right").checked = !!s.dinv[1];
+    $("drive-max").value = s.dmax;
+  }
+}
+async function refreshDrive() {
+  const r = await getJSON("/api/drive");
+  driveEnabled = !!r.enabled;
+  $("drive-off").hidden = driveEnabled;
+  $("drive-on").hidden = !driveEnabled;
+  if (!driveEnabled) return;
+  if (r.status) showDriveStatus(r.status);
+  else setText("drive-link", r.error, "err");
+}
 
 // --- spray tab -----------------------------------------------------------------
 let status = null;
@@ -451,7 +633,8 @@ async function refresh() {
   if (refreshing) return;
   refreshing = true;
   try {
-    if (activeTab === "camera") await refreshCamera(); else await refreshSpray();
+    if (activeTab === "camera") await Promise.all([refreshCamera(), refreshDrive()]);
+    else await refreshSpray();
   } catch (e) {
     if (activeTab === "spray") showRobotError("Lost contact with the web server. Is it still running?");
     else setText("cam-status", "web app not running (start python -m wd9000.web)", "err");

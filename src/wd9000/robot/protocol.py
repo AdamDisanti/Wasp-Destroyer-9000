@@ -13,7 +13,7 @@ from enum import IntEnum
 HEARTBEAT = "{Heartbeat}"
 
 # Drivetrain commands. RobotClient refuses these unless motion is enabled.
-MOTION_COMMANDS = frozenset({1, 2, 3, 4, 101, 102, 103})
+MOTION_COMMANDS = frozenset({1, 2, 3, 4, 101, 102, 103, 130})
 
 
 class Direction(IntEnum):
@@ -56,6 +56,19 @@ class SprayServo(IntEnum):
 class SprayPose(IntEnum):
     REST = 0
     PRESS = 1
+
+
+# --- Track drive (our firmware too) ---
+
+# Tracks stop unless the drive command is resent within this window.
+DRIVE_LEASE_S = 0.5
+DRIVE_MAX_SPEED = 255
+
+
+class Track(IntEnum):
+    LEFT = 1
+    RIGHT = 2
+    BOTH = 3
 
 
 def _check_range(name: str, value: int, low: int, high: int) -> int:
@@ -151,6 +164,28 @@ def spray_status() -> dict:
 
 def spray_defaults() -> dict:
     return {"N": 128}
+
+
+def tracks(left: int, right: int) -> dict:
+    """Signed track speeds (+ = forward), held only while resent within DRIVE_LEASE_S.
+    0, 0 stops. The firmware caps both at drive_max. Motion command."""
+    return {"N": 130, "D1": _check_range("left", left, -DRIVE_MAX_SPEED, DRIVE_MAX_SPEED),
+            "D2": _check_range("right", right, -DRIVE_MAX_SPEED, DRIVE_MAX_SPEED)}
+
+
+def track_invert(track: Track, inverted: bool) -> dict:
+    """Reverse a track's direction (if it runs backwards when told to go forward)."""
+    return {"N": 131, "D1": int(track), "D2": int(inverted)}
+
+
+def track_swap(swapped: bool) -> dict:
+    """Swap the left/right motor outputs (if the left key turns the right track)."""
+    return {"N": 132, "D1": int(swapped)}
+
+
+def drive_max(speed: int) -> dict:
+    """Top track speed, 0..255."""
+    return {"N": 133, "D1": _check_range("speed", speed, 0, DRIVE_MAX_SPEED)}
 
 
 def parse_spray_status(value: str) -> dict:

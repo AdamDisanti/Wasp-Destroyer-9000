@@ -1,8 +1,8 @@
 /*
-  WD9000 spray servo tester, driven over Wi-Fi.
+  WD9000 robot firmware: spray servos and track drive, over Wi-Fi.
 
   The ESP32 camera board relays JSON from TCP port 100 to this UNO at 9600
-  baud, so the Mac controls the servos with the web app (python -m wd9000.web)
+  baud, so the Mac controls the robot with the web app (python -m wd9000.web)
   or scripts/spray_test.py. The camera stream keeps working.
 
   Angles are "press angles": 90 = rest (horns level), 0 = pressing, the same
@@ -10,7 +10,7 @@
   servo 2 is inverted by default: raw = 180 - angle. Flip with N:124.
 
   Commands ({"N":..,"D1":..,"D2":..,"H":"id"}; replies {id_ok}, {id_err}, ...)
-    100                       release + stop (the ESP32 sends this when the client drops)
+    100                       release + stop the tracks
     120  D1=1 | 0             press while resent every < 500 ms (lease) | release
     121  D1=ms                timed press, 50..max_on_ms
     122  D1=servo D2=angle    jog servo 1, 2 or 3 (both) to a press angle
@@ -18,10 +18,15 @@
     124  D1=servo D2=0 | 1    invert servo off | on
     125  D1=ms                max_on_ms (100..30000), hard cap on any press
     126  D1=deg/s             move speed (0..1000, 0 = instant)
-    127                       status: {id_st=REST;pos=90,90;...;vcc=..;vmin=..;bat=..;bmin=..}
+    127                       status: {id_st=REST;pos=90,90;...;vcc=..;vmin=..;bat=..;bmin=..;drv=..}
                               vcc/bat = UNO supply and battery in mV now; vmin/bmin = lowest
                               since the previous status read (catches dips while servos move)
-    128                       restore defaults
+    128                       restore spray defaults
+    130  D1=left D2=right     track speeds -255..255 (+ = forward), held while resent
+                              every < 500 ms (lease), capped at drive_max. 0,0 stops.
+    131  D1=side D2=0 | 1     invert track 1 (left), 2 (right) or 3 (both)
+    132  D1=0 | 1             swap the left/right motor outputs
+    133  D1=0..255            drive_max, top track speed
   Settings live in EEPROM. A lease press that hits max_on_ms latches: further
   presses reply "capped" until a release.
 
@@ -30,10 +35,14 @@
     Final robot: LineTrack header A0/A1, keeping 10/11 for the camera servos.
     Pressing the can needs a separate 5-6 V, >= 3 A servo supply with its
     ground tied to the shield GND.
+    Tracks: TB6612FNG on shield V1.1, pins as in the kit firmware. If a track
+    runs backwards or the sides are swapped, fix it with N:131 / N:132.
   Slide switch: "upload" to flash, "cam" to drive it over Wi-Fi.
 
-  Safety: boots to rest; every press is capped at max_on_ms; N:100 (stop or
-  client disconnect) releases. The shield's MODE button toggles press/release.
+  Safety: boots to rest with the tracks stopped. Our ESP32 sends nothing when
+  the laptop disconnects, so both the spray hold and the tracks stop by
+  themselves when resends stop; every press is capped at max_on_ms; N:100
+  releases and stops. The shield's MODE button toggles press/release.
 */
 
 #include <EEPROM.h>
@@ -41,13 +50,18 @@
 
 const uint8_t PIN_SERVO[2] = {10, 11};  // servo headers P10, P1. Final robot: {A0, A1}
 const uint8_t PIN_BUTTON = 2;           // shield MODE key, active LOW
-const uint8_t MOTOR_PINS[] = {3, 5, 6, 7, 8};  // motor driver inputs, held LOW
 const uint8_t PIN_BATTERY = A3;         // battery through the shield's 10k/1.5k divider
+// TB6612: channel B drives the left track, channel A the right (kit firmware).
+const uint8_t PIN_MOTOR_PWM[2] = {6, 5};  // left, right
+const uint8_t PIN_MOTOR_DIR[2] = {8, 7};
+const uint8_t PIN_MOTOR_STBY = 3;
 
 const unsigned long LEASE_MS = 500;
+const unsigned long DRIVE_LEASE_MS = 500;
 const unsigned long MAX_ON_LIMIT_MS = 30000;
 const unsigned long DEBOUNCE_MS = 30;
 const unsigned long STEP_MS = 10;
+const uint8_t DRIVE_RAMP_PER_STEP = 20;  // speed-up per 10 ms: 0 -> 255 in about 130 ms
 const unsigned long POWER_SAMPLE_MS = 3;
 const float BATTERY_DIVIDER = (10.0 + 1.5) / 1.5;
 
@@ -66,6 +80,17 @@ const int EE_SETTINGS = 0;
 const int EE_BOOTS = 32;
 Settings cfg;
 
+struct DriveSettings {
+  uint16_t magic;
+  uint8_t invert[2];  // left, right track
+  uint8_t swap;       // left track is on the right motor output
+  uint8_t maxPwm;
+};
+const uint16_t DRIVE_MAGIC = 0xD401;
+const DriveSettings DRIVE_DEFAULTS = {DRIVE_MAGIC, {0, 0}, 0, 150};
+const int EE_DRIVE = 40;
+DriveSettings driveCfg;
+
 enum State { REST_STATE, PRESS_STATE, MANUAL_STATE };
 const char *const STATE_NAMES[] = {"REST", "PRESS", "MANUAL"};
 
@@ -77,6 +102,8 @@ unsigned long onSince = 0;
 unsigned long leaseUntil = 0;  // >0 while a lease press is running
 unsigned long pulseMs = 0;     // >0 while a timed press is running
 bool capLatched = false;
+int16_t driveTarget[2], drivePwm[2];  // signed track speeds, left/right
+unsigned long driveUntil = 0;         // >0 while the tracks are commanded to move
 uint16_t boots;
 uint16_t vccMv, vccMinMv = 0xFFFF, batMv, batMinMv = 0xFFFF;
 
@@ -96,21 +123,23 @@ uint16_t readVccMv() {
   return 1125300UL / ADC;  // 1.1 V * 1023 * 1000
 }
 
-// Alternate between the supply and the battery; keep the lowest of each.
+// The battery reading is scaled by the supply (the ADC reference), so measure both
+// back to back: during a supply dip, a supply value from an earlier sample makes
+// the battery read far too low.
+void readPower() {
+  vccMv = readVccMv();
+  analogRead(PIN_BATTERY);  // discard: the mux was on the bandgap
+  batMv = analogRead(PIN_BATTERY) * (float)vccMv / 1023.0 * BATTERY_DIVIDER;
+}
+
+// Sample the supply and battery; keep the lowest of each.
 void samplePower() {
   static unsigned long last = 0;
-  static bool battery = false;
   if (millis() - last < POWER_SAMPLE_MS) return;
   last = millis();
-  if (battery) {
-    analogRead(PIN_BATTERY);  // discard: the mux was on the bandgap
-    batMv = analogRead(PIN_BATTERY) * (float)vccMv / 1023.0 * BATTERY_DIVIDER;
-    if (batMv < batMinMv) batMinMv = batMv;
-  } else {
-    vccMv = readVccMv();
-    if (vccMv < vccMinMv) vccMinMv = vccMv;
-  }
-  battery = !battery;
+  readPower();
+  if (vccMv < vccMinMv) vccMinMv = vccMv;
+  if (batMv < batMinMv) batMinMv = batMv;
 }
 
 uint8_t rawAngle(uint8_t i, uint8_t angle) { return cfg.invert[i] ? 180 - angle : angle; }
@@ -118,9 +147,14 @@ uint8_t rawAngle(uint8_t i, uint8_t angle) { return cfg.invert[i] ? 180 - angle 
 void loadSettings() {
   EEPROM.get(EE_SETTINGS, cfg);
   if (cfg.magic != MAGIC) cfg = DEFAULTS;
+  EEPROM.get(EE_DRIVE, driveCfg);
+  if (driveCfg.magic != DRIVE_MAGIC) driveCfg = DRIVE_DEFAULTS;
 }
 
-void saveSettings() { EEPROM.put(EE_SETTINGS, cfg); }
+void saveSettings() {
+  EEPROM.put(EE_SETTINGS, cfg);
+  EEPROM.put(EE_DRIVE, driveCfg);
+}
 
 void moveTo(const uint8_t pose[2]) {
   target[0] = pose[0];
@@ -156,6 +190,48 @@ void updateServos() {
   }
 }
 
+// Output the current track speeds. Standby (both motors off) when neither moves.
+void writeMotors() {
+  for (uint8_t side = 0; side < 2; side++) {
+    uint8_t out = driveCfg.swap ? 1 - side : side;
+    bool forward = (drivePwm[side] >= 0) != (bool)driveCfg.invert[side];
+    digitalWrite(PIN_MOTOR_DIR[out], forward ? HIGH : LOW);
+    analogWrite(PIN_MOTOR_PWM[out], abs(drivePwm[side]));
+  }
+  digitalWrite(PIN_MOTOR_STBY, drivePwm[0] || drivePwm[1] ? HIGH : LOW);
+}
+
+void stopDrive() {
+  driveTarget[0] = driveTarget[1] = 0;
+  drivePwm[0] = drivePwm[1] = 0;
+  driveUntil = 0;
+  writeMotors();
+}
+
+// Slowing down and stopping are immediate; speeding up ramps, which softens the
+// current surge on the battery (it also feeds the UNO and the camera).
+void updateDrive() {
+  static unsigned long last = 0;
+  unsigned long now = millis();
+  if (driveUntil && (long)(now - driveUntil) >= 0) {
+    stopDrive();  // no resend within the lease
+    return;
+  }
+  if (now - last < STEP_MS) return;
+  last = now;
+  for (uint8_t i = 0; i < 2; i++) {
+    int16_t t = driveTarget[i], &p = drivePwm[i];
+    if (t == 0 || (p != 0 && (t > 0) != (p > 0))) {
+      p = 0;  // stop, or pass through 0 when reversing
+    } else if (abs(t) <= abs(p)) {
+      p = t;
+    } else {
+      p += t > 0 ? min(DRIVE_RAMP_PER_STEP, t - p) : -min(DRIVE_RAMP_PER_STEP, p - t);
+    }
+  }
+  writeMotors();
+}
+
 void checkPress() {
   if (state != PRESS_STATE) return;
   unsigned long now = millis();
@@ -179,7 +255,7 @@ bool jsonInt(const char *json, const char *key, long *out) {
   return true;
 }
 
-void printPair(const __FlashStringHelper *key, uint8_t a, uint8_t b) {
+void printPair(const __FlashStringHelper *key, int a, int b) {
   Serial.print(key);
   Serial.print(a);
   Serial.print(',');
@@ -210,6 +286,12 @@ void printStatus() {
   Serial.print(batMv);
   Serial.print(F(";bmin="));
   Serial.print(batMinMv);
+  printPair(F(";drv="), drivePwm[0], drivePwm[1]);
+  printPair(F(";dinv="), driveCfg.invert[0], driveCfg.invert[1]);
+  Serial.print(F(";dswap="));
+  Serial.print(driveCfg.swap);
+  Serial.print(F(";dmax="));
+  Serial.print(driveCfg.maxPwm);
   vccMinMv = vccMv;
   batMinMv = batMv;
 }
@@ -220,6 +302,7 @@ const char *runCommand(long n, bool hasD1, long d1, bool hasD2, long d2) {
     case 100:
       capLatched = false;
       release();
+      stopDrive();
       return "ok";
     case 120:
       if (!hasD1) return "err";
@@ -271,6 +354,34 @@ const char *runCommand(long n, bool hasD1, long d1, bool hasD2, long d2) {
       saveSettings();
       capLatched = false;
       release();
+      return "ok";
+    case 130:
+      if (!hasD1 || !hasD2 || d1 < -255 || d1 > 255 || d2 < -255 || d2 > 255) return "err";
+      if (d1 == 0 && d2 == 0) {
+        stopDrive();
+        return "ok";
+      }
+      driveTarget[0] = constrain(d1, -(long)driveCfg.maxPwm, (long)driveCfg.maxPwm);
+      driveTarget[1] = constrain(d2, -(long)driveCfg.maxPwm, (long)driveCfg.maxPwm);
+      driveUntil = millis() + DRIVE_LEASE_MS;
+      return "ok";
+    case 131:
+      if (!hasD1 || !hasD2 || d1 < 1 || d1 > 3 || d2 < 0 || d2 > 1) return "err";
+      stopDrive();
+      if (d1 & 1) driveCfg.invert[0] = d2;
+      if (d1 & 2) driveCfg.invert[1] = d2;
+      saveSettings();
+      return "ok";
+    case 132:
+      if (!hasD1 || d1 < 0 || d1 > 1) return "err";
+      stopDrive();
+      driveCfg.swap = d1;
+      saveSettings();
+      return "ok";
+    case 133:
+      if (!hasD1 || d1 < 0 || d1 > 255) return "err";
+      driveCfg.maxPwm = d1;
+      saveSettings();
       return "ok";
     default:
       return "unknown";
@@ -351,12 +462,14 @@ void readButton() {
 }
 
 void setup() {
-  for (uint8_t pin : MOTOR_PINS) {
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
+  for (uint8_t i = 0; i < 2; i++) {
+    pinMode(PIN_MOTOR_PWM[i], OUTPUT);
+    pinMode(PIN_MOTOR_DIR[i], OUTPUT);
   }
+  pinMode(PIN_MOTOR_STBY, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   loadSettings();
+  stopDrive();
 
   // Start at rest; write before attach so the first pulse isn't 90.
   moveTo(cfg.rest);
@@ -369,9 +482,9 @@ void setup() {
   EEPROM.get(EE_BOOTS, boots);
   EEPROM.put(EE_BOOTS, ++boots);
 
-  vccMv = vccMinMv = readVccMv();
-  analogRead(PIN_BATTERY);
-  batMv = batMinMv = analogRead(PIN_BATTERY) * (float)vccMv / 1023.0 * BATTERY_DIVIDER;
+  readPower();
+  vccMinMv = vccMv;
+  batMinMv = batMv;
 
   Serial.begin(9600);
   Serial.print(F("{spray_boot "));
@@ -384,5 +497,6 @@ void loop() {
   readButton();
   checkPress();
   updateServos();
+  updateDrive();
   samplePower();
 }

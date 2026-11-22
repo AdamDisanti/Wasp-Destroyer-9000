@@ -58,15 +58,23 @@ python -m wd9000.viewer --source 0 --backend mock              # laptop webcam, 
 The HUD shows camera FPS, inference FPS, end-to-end detection latency and any
 connection errors. The stream reconnects automatically if the robot drops out.
 
-## Web app (camera + spray test)
+## Web app (camera, driving, spray test)
 
-A local web page with two tabs: **Camera** (live feed with nest-detection boxes)
-and **Spray test** (point-and-click servo testing for the spray actuator).
+A local web page with two tabs: **Camera** (live feed with nest-detection boxes,
+plus drive controls) and **Spray test** (point-and-click servo testing for the
+spray actuator).
 
 ```bash
 python -m wd9000.web                  # then open http://localhost:8000
+python -m wd9000.web --drive          # also allow driving the tracks
 python -m wd9000.web --no-detect      # camera without Docker/detection
 ```
+
+Driving: hold **W A S D** or the arrow keys on the Camera tab (Space stops).
+The page resends the command several times a second and the UNO stops the
+tracks if it hears nothing for 500 ms, so a closed page or dropped Wi-Fi stops
+the robot. Lift the tracks for the first run and use **Track setup** to fix a
+track that runs backwards or a swapped left/right.
 
 It only accepts connections from the Mac it runs on. The Spray test tab needs
 `firmware/servo_spray_test` on the UNO (see [firmware/README.md](firmware/README.md)).
@@ -79,8 +87,8 @@ Try it without the robot: run `python -m wd9000.robot.sim` in another terminal, 
 JSON). The kit's ESP32 source has a 1 Hz heartbeat failsafe, but our robot's
 ESP32 doesn't send heartbeats (see [docs/hardware.md](docs/hardware.md)), so
 safety timeouts live in the UNO firmware.
-Drive commands are refused unless `robot.motion_enabled: true` in
-`config/settings.yaml` (default `false`).
+Drive commands are refused unless the web app runs with `--drive` or
+`robot.motion_enabled: true` is set in `config/settings.yaml` (default `false`).
 
 Bench test with just the boards (no motors or servos needed). Close the ELEGOO
 phone app first; the ESP32 accepts one command client at a time:

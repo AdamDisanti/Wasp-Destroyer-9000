@@ -19,6 +19,10 @@ the commands to the UNO, and the camera stream keeps working.
   `mirror 1 on` / `mirror 2 off` in the console, no re-flash needed.
 - Both servos move together and **hold** position. The factory firmware moves
   one at a time and cuts the signal after 500 ms.
+- It also **drives the tracks** (TB6612FNG shield V1.1, the kit's motor pins),
+  from the web app's Camera tab with `python -m wd9000.web --drive`. The tracks
+  run only while the laptop keeps resending (500 ms lease), speed is capped
+  (default 150 of 255), and speeding up is ramped. The MPU6050 isn't used.
 
 ### Power, read this first
 
@@ -91,9 +95,22 @@ our mount). Suggested first run, **can removed**:
 
 Saved poses and settings are kept in EEPROM.
 
+### First drive
+
+1. Lift the robot so **both tracks are off the ground**.
+2. `python -m wd9000.web --drive`, open the Camera tab, expand **Track setup**.
+3. Hold **Test left track**: the left track should turn the way that drives
+   forward. If the right track moves instead, tick **Swap sides**. If it turns
+   backwards, tick **Reverse left track**. Apply, then check the right track.
+4. Hold **W**: both tracks forward. **A**: spins left. Let go: stops.
+5. Unplug Wi-Fi (or close the page) while holding a key: the tracks stop
+   within half a second.
+6. On the floor, start at a low speed. The setup is stored on the UNO.
+
 ### Safety
 
-- Boots to rest.
+- Boots to rest with the tracks stopped. `{"N":100}` releases and stops.
+- The tracks stop by themselves 500 ms after the last drive command.
 - Every press is capped at `max` ms (default 2000).
 - `on` holds only while the Mac keeps resending (500 ms lease). If the console
   crashes or Wi-Fi drops, the press releases on its own.

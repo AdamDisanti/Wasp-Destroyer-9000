@@ -8,7 +8,7 @@ items marked **unverified** still need testing on our robot.
 
 | Part | Variants | How to tell | Our board |
 |---|---|---|---|
-| Motor driver on shield | **TB6612** (shield V1.1) or **DRV8835** (V1.0) | Chip in the middle of the shield; see `01 ReadMeFirst/ReadMeFirst.pdf` | **unverified** |
+| Motor driver on shield | **TB6612** (shield V1.1) or **DRV8835** (V1.0) | Chip in the middle of the shield; see `01 ReadMeFirst/ReadMeFirst.pdf` | **TB6612FNG** (U1, checked 2026-11-21) |
 | UNO USB-serial chip | CH340 or HT42B534 | Chip next to USB port | **unverified** |
 | Camera board | ESP32-WROVER-Camera | Label on board | **unverified** |
 

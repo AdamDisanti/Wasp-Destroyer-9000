@@ -41,6 +41,7 @@ def test_out_of_range_values_rejected(build):
 def test_motion_classification():
     assert protocol.is_motion(protocol.drive(protocol.Direction.LEFT, 50))
     assert protocol.is_motion(protocol.track_speeds(10, 10))
+    assert protocol.is_motion(protocol.tracks(-100, 100))
     assert not protocol.is_motion(protocol.stop())
     assert not protocol.is_motion(protocol.set_light(1, 2, 3))
     assert not protocol.is_motion(protocol.servo_angle(protocol.Servo.PAN, 90))
@@ -120,7 +121,7 @@ def test_robot_drops_hung_client_and_stops(sim):
     client.connect()
     client.request(protocol.drive(protocol.Direction.FORWARD, 80))
     client.answer_heartbeats = False
-    assert _wait_for(lambda: not client.connected)
+    assert _wait_for(lambda: reasons)  # on_disconnect runs just after `connected` clears
     assert reasons == ["connection closed by robot"]
     assert sim.state.motion is None and sim.state.stops >= 1
 
@@ -239,3 +240,60 @@ def test_heartbeat_watchdog_switches_on_after_first_heartbeat():
         client = RobotClient(robot.host, robot.port).connect()
         assert _wait_for(lambda: client.heartbeats_seen)
         client.close()
+
+
+# --- Track drive ---------------------------------------------------------------
+
+
+def test_track_builders():
+    assert protocol.tracks(-120, 255) == {"N": 130, "D1": -120, "D2": 255}
+    assert protocol.track_invert(protocol.Track.RIGHT, True) == {"N": 131, "D1": 2, "D2": 1}
+    assert protocol.track_swap(True) == {"N": 132, "D1": 1}
+    assert protocol.drive_max(150) == {"N": 133, "D1": 150}
+    with pytest.raises(ValueError):
+        protocol.tracks(256, 0)
+    assert protocol.parse_spray_status("drv=-150,150;dmax=150")["drv"] == (-150, 150)
+
+
+@pytest.fixture
+def drive_rig():
+    with SimRobot(drive_lease_s=0.2) as robot:
+        client = RobotClient(robot.host, robot.port, reply_timeout_s=1, motion_enabled=True).connect()
+        yield robot, client
+        client.close()
+
+
+def test_tracks_refused_unless_motion_enabled():
+    with SimRobot() as robot:
+        client = RobotClient(robot.host, robot.port).connect()
+        with pytest.raises(MotionDisabledError):
+            client.request(protocol.tracks(100, 100))
+        client.close()
+
+
+def test_tracks_capped_and_stop_without_resend(drive_rig):
+    _, client = drive_rig
+    assert client.request(protocol.tracks(255, -255)) == "ok"
+    assert _status(client)["drv"] == (150, -150)  # default drive_max
+    time.sleep(0.35)  # past the 0.2 s lease
+    assert _status(client)["drv"] == (0, 0)
+
+
+def test_tracks_stop_on_stop_and_disconnect(drive_rig):
+    robot, client = drive_rig
+    client.request(protocol.tracks(100, 100))
+    client.stop()
+    assert _wait_for(lambda: robot.state.spray.drive == [0, 0])
+    client.request(protocol.tracks(100, 100))
+    client.close()
+    assert _wait_for(lambda: robot.state.spray.drive == [0, 0])
+
+
+def test_track_setup_is_stored(drive_rig):
+    _, client = drive_rig
+    client.request(protocol.track_invert(protocol.Track.LEFT, True))
+    client.request(protocol.track_swap(True))
+    client.request(protocol.drive_max(200))
+    client.request(protocol.spray_defaults())  # spray defaults leave the track setup alone
+    status = _status(client)
+    assert (status["dinv"], status["dswap"], status["dmax"]) == ((1, 0), 1, 200)

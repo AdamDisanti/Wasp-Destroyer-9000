@@ -35,6 +35,12 @@ class SimSpray:
     on_since: float = 0.0
     lease_until: float | None = None
     pulse_s: float | None = None
+    # Tracks (same firmware): signed speeds, held until drive_until
+    drive: list[int] = field(default_factory=lambda: [0, 0])
+    drive_invert: list[int] = field(default_factory=lambda: [0, 0])
+    drive_swap: int = 0
+    drive_max: int = 150
+    drive_until: float | None = None
 
     def start_press(self, now: float, lease_s: float | None, pulse_s: float | None) -> None:
         if self.state != "PRESS":
@@ -50,7 +56,13 @@ class SimSpray:
         self.lease_until = self.pulse_s = None
         self.pos = list(self.rest)
 
+    def stop_drive(self) -> None:
+        self.drive = [0, 0]
+        self.drive_until = None
+
     def update(self, now: float) -> None:
+        if self.drive_until is not None and now >= self.drive_until:
+            self.stop_drive()
         if self.state != "PRESS":
             return
         held = now - self.on_since
@@ -68,7 +80,10 @@ class SimSpray:
         pairs = {"pos": self.pos, "raw": raw, "rest": self.rest, "press": self.press, "inv": self.invert}
         return ";".join([f"st={self.state}", *(f"{k}={v[0]},{v[1]}" for k, v in pairs.items()),
                          f"max={self.max_on_ms}", f"spd={self.speed}", f"cap={int(self.capped)}", "boot=1",
-                         "vcc=5000", "vmin=5000", "bat=8000", "bmin=8000"])
+                         "vcc=5000", "vmin=5000", "bat=8000", "bmin=8000",
+                         f"drv={self.drive[0]},{self.drive[1]}",
+                         f"dinv={self.drive_invert[0]},{self.drive_invert[1]}",
+                         f"dswap={self.drive_swap}", f"dmax={self.drive_max}"])
 
 
 @dataclass
@@ -85,11 +100,13 @@ class SimState:
 class SimRobot:
     def __init__(self, host: str = "127.0.0.1", port: int = 0, heartbeat_interval_s: float = 1.0,
                  missed_heartbeats_allowed: int = 3, distance_cm: int = 57,
-                 spray_lease_s: float = protocol.SPRAY_LEASE_S, send_heartbeats: bool = True):
+                 spray_lease_s: float = protocol.SPRAY_LEASE_S, drive_lease_s: float = protocol.DRIVE_LEASE_S,
+                 send_heartbeats: bool = True):
         self.heartbeat_interval_s = heartbeat_interval_s
         self.missed_heartbeats_allowed = missed_heartbeats_allowed
         self.distance_cm = distance_cm
         self.spray_lease_s = spray_lease_s
+        self.drive_lease_s = drive_lease_s
         self.send_heartbeats = send_heartbeats  # False mimics the ESP32 on our robot
         self.state = SimState()
         self._server = socket.create_server((host, port))
@@ -178,6 +195,7 @@ class SimRobot:
         self.state.stops += 1
         self.state.spray.capped = False
         self.state.spray.release()
+        self.state.spray.stop_drive()
 
     def _handle_spray(self, n: int, cmd: dict) -> str:
         sp, now = self.state.spray, time.monotonic()
@@ -210,7 +228,23 @@ class SimRobot:
         elif n == 127:
             return sp.status()
         elif n == 128:
-            self.state.spray = SimSpray(presses=sp.presses)
+            self.state.spray = SimSpray(presses=sp.presses, drive_invert=sp.drive_invert,
+                                        drive_swap=sp.drive_swap, drive_max=sp.drive_max)
+        elif n == 130 and all(isinstance(d, int) and -255 <= d <= 255 for d in (d1, d2)):
+            if d1 == d2 == 0:
+                sp.stop_drive()
+            else:
+                sp.drive = [max(-sp.drive_max, min(sp.drive_max, d)) for d in (d1, d2)]
+                sp.drive_until = now + self.drive_lease_s
+        elif n == 131 and servos and d2 in (0, 1):
+            sp.stop_drive()
+            for i in servos:
+                sp.drive_invert[i] = d2
+        elif n == 132 and d1 in (0, 1):
+            sp.stop_drive()
+            sp.drive_swap = d1
+        elif n == 133 and isinstance(d1, int) and 0 <= d1 <= 255:
+            sp.drive_max = d1
         else:
             return "err"
         return "ok"
@@ -235,11 +269,11 @@ class SimRobot:
             for s in (1, 2) if cmd.get("D1") == 3 else (cmd.get("D1"),):
                 self.state.servo[s] = max(0, min(180, cmd.get("D2", 90)))
             return f"{{{h}_ok}}"
+        if 120 <= n <= 133:
+            return f"{{{h}_{self._handle_spray(n, cmd)}}}" if h else None
         if n in protocol.MOTION_COMMANDS:
             self.state.motion = cmd
             return f"{{{h}_ok}}" if n in (1, 3, 4) else None
-        if 120 <= n <= 128:
-            return f"{{{h}_{self._handle_spray(n, cmd)}}}" if h else None
         if n == 21:
             if cmd.get("D1") == 2:
                 return f"{{{h}_{self.distance_cm}}}"

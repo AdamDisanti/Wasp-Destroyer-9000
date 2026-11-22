@@ -18,10 +18,11 @@ from wd9000.web.server import CameraService, SprayService, WebServer
 SAMPLE = PROJECT_ROOT / "samples" / "paper_wasp_nest.jpg"
 
 
-def _serve(robot_port: int):
+def _serve(robot_port: int, drive: bool = False):
     camera = FrameSource(str(SAMPLE)).start()
     worker = InferenceWorker(MockDetector(), camera.latest).start()
-    spray = SprayService(RobotClient("127.0.0.1", robot_port, connect_timeout_s=1, reply_timeout_s=1))
+    spray = SprayService(RobotClient("127.0.0.1", robot_port, connect_timeout_s=1, reply_timeout_s=1,
+                                     motion_enabled=drive))
     server = WebServer(("127.0.0.1", 0), CameraService(camera, worker, "mock", 2.0), spray)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -151,3 +152,40 @@ def test_frame_polling(web):
         assert r.status in (200, 204)  # a newer frame, or none within the wait
         if r.status == 200:
             assert r.headers["X-Frame-Key"] != key
+
+
+@pytest.fixture
+def web_drive():
+    with SimRobot(drive_lease_s=0.3) as robot:
+        server = _serve(robot.port, drive=True)
+        yield server, robot
+        _stop(server)
+
+
+def test_drive_off_by_default(web):
+    server, robot = web
+    assert _call(server, "/api/drive") == (200, {"enabled": False})
+    status, data = _call(server, "/api/drive/move", {"left": 100, "right": 100})
+    assert status == 409 and "--drive" in data["error"]
+    assert robot.state.spray.drive == [0, 0]
+    assert _call(server, "/api/drive/stop", {})[0] == 200  # stop is always fine
+
+
+def test_drive_move_stop_and_settings(web_drive):
+    server, robot = web_drive
+    status, data = _call(server, "/api/drive")
+    assert data["enabled"] and data["status"]["drv"] == [0, 0]
+    assert _call(server, "/api/drive/move", {"left": 100, "right": -100}) == (200, {"value": "ok"})
+    assert robot.state.spray.drive == [100, -100]
+    status, data = _call(server, "/api/drive/stop", {})
+    assert status == 200 and data["status"]["drv"] == [0, 0]
+    status, data = _call(server, "/api/drive/settings", {"swap": True, "invert_left": False,
+                                                         "invert_right": True, "max": 120})
+    assert status == 200 and data["status"]["dswap"] == 1 and data["status"]["dinv"] == [0, 1]
+    assert data["status"]["dmax"] == 120
+
+
+def test_drive_stops_when_resends_stop(web_drive):
+    server, robot = web_drive
+    _call(server, "/api/drive/move", {"left": 80, "right": 80})
+    assert _wait_for(lambda: robot.state.spray.drive == [0, 0], timeout=2)

@@ -37,6 +37,6 @@ robot:
   # Treat the link as lost if the robot's 1 Hz heartbeat stops this long. Only
   # applies once a heartbeat has been seen: our robot's ESP32 sends none.
   link_timeout_s: 3.5
-  # Drive commands are refused while false. Leave it false until the drivetrain
-  # is assembled and the stop path has been verified on the real robot.
+  # Drive commands are refused while false. `python -m wd9000.web --drive`
+  # turns driving on for one run; leave this false so driving stays opt-in.
   motion_enabled: false

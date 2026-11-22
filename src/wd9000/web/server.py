@@ -1,10 +1,11 @@
-"""Local web app: live camera with nest detection, and a spray actuator test panel.
+"""Local web app: live camera with nest detection and driving, and a spray actuator test panel.
 
 Usage:
     python -m wd9000.web                       # then open http://localhost:8000
+    python -m wd9000.web --drive               # also allow driving the tracks
     python -m wd9000.web --source samples/paper_wasp_nest.jpg --backend mock --robot 127.0.0.1:10100
 
-Listens on localhost only: anyone who can reach it can press the spray.
+Listens on localhost only: anyone who can reach it can press the spray or drive.
 """
 
 import argparse
@@ -22,8 +23,8 @@ import cv2
 from wd9000.camera.stream import FrameSource
 from wd9000.config import get_api_key, load_settings
 from wd9000.robot import protocol
-from wd9000.robot.client import RobotClient
-from wd9000.robot.protocol import SprayPose, SprayServo
+from wd9000.robot.client import MotionDisabledError, RobotClient
+from wd9000.robot.protocol import SprayPose, SprayServo, Track
 from wd9000.vision.detector import make_detector
 from wd9000.vision.visualization import draw_detections
 from wd9000.vision.worker import InferenceWorker
@@ -108,7 +109,8 @@ class RobotUnavailable(Exception):
 
 
 class SprayService:
-    """Owns the single command connection to the robot (the ESP32 allows one client)."""
+    """Owns the single command connection to the robot (the ESP32 allows one client).
+    Handles the spray and, when motion is enabled, the tracks."""
 
     RETRY_S = 2.0
 
@@ -204,6 +206,33 @@ class SprayService:
             raise KeyError(action)
         return {"value": value, "status": self.status()}
 
+    @property
+    def drive_enabled(self) -> bool:
+        return self.client.motion_enabled
+
+    def drive(self, action: str, body: dict) -> dict:
+        """Run one drive action. Raises MotionDisabledError unless started with --drive."""
+        if action == "move":
+            # Sent several times a second while a key is held; the tracks stop if resends stop.
+            return {"value": self.request(protocol.tracks(int(body["left"]), int(body["right"])))}
+        if action == "stop":
+            value = self.request(protocol.tracks(0, 0)) if self.drive_enabled else "ok"
+        elif action == "settings":
+            if not self.drive_enabled:
+                raise MotionDisabledError("driving is off")
+            if "invert_left" in body:
+                self.request(protocol.track_invert(Track.LEFT, bool(body["invert_left"])))
+            if "invert_right" in body:
+                self.request(protocol.track_invert(Track.RIGHT, bool(body["invert_right"])))
+            if "swap" in body:
+                self.request(protocol.track_swap(bool(body["swap"])))
+            if "max" in body:
+                self.request(protocol.drive_max(int(body["max"])))
+            value = "ok"
+        else:
+            raise KeyError(action)
+        return {"value": value, "status": self.status()}
+
     def close(self) -> None:
         self.client.close()
 
@@ -252,12 +281,16 @@ class Handler(BaseHTTPRequestHandler):
             self._stream_video()
         elif path == "/api/camera":
             self._send_json(self.server.camera.status())
-        elif path == "/api/spray":
+        elif path in ("/api/spray", "/api/drive"):
             spray = self.server.spray
+            if path == "/api/drive" and not spray.drive_enabled:
+                self._send_json({"enabled": False})  # don't touch the robot link
+                return
             try:
-                self._send_json({"connected": True, "status": spray.status()})
+                self._send_json({"enabled": spray.drive_enabled, "connected": True, "status": spray.status()})
             except (RobotUnavailable, ValueError) as e:
-                self._send_json({"connected": spray.client.connected, "error": str(e)})
+                self._send_json({"enabled": spray.drive_enabled, "connected": spray.client.connected,
+                                 "error": str(e)})
         else:
             self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -289,13 +322,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
             worker.enabled = bool(body.get("enabled"))
             self._send_json(self.server.camera.status())
-        elif path.startswith("/api/spray/"):
+        elif path.startswith(("/api/spray/", "/api/drive/")):
+            spray, action = self.server.spray, path.rsplit("/", 1)[1]
             try:
-                self._send_json(self.server.spray.handle(path.rsplit("/", 1)[1], body))
+                if path.startswith("/api/spray/"):
+                    self._send_json(spray.handle(action, body))
+                else:
+                    self._send_json(spray.drive(action, body))
             except KeyError as e:
                 self._send_json({"error": f"unknown action or missing field {e}"}, HTTPStatus.BAD_REQUEST)
-            except ValueError as e:
+            except (TypeError, ValueError) as e:
                 self._send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+            except MotionDisabledError:
+                self._send_json({"error": "Driving is off. Restart the web app with: python -m wd9000.web --drive"},
+                                HTTPStatus.CONFLICT)
             except RobotUnavailable as e:
                 self._send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
         else:
@@ -372,6 +412,8 @@ def main() -> int:
     parser.add_argument("--backend", choices=["cloud", "local", "mock"], help="inference backend")
     parser.add_argument("--no-detect", action="store_true", help="video only, no inference")
     parser.add_argument("--robot", help="robot command server as host:port (default from settings.yaml)")
+    parser.add_argument("--drive", action="store_true",
+                        help="allow driving the tracks (needs the drive firmware; lift the tracks for the first test)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -402,12 +444,13 @@ def main() -> int:
     host, port = (parse_host_port(args.robot) if args.robot
                   else (robot_cfg["host"], robot_cfg["command_port"]))
     client = RobotClient(host, port, robot_cfg["connect_timeout_s"], robot_cfg["reply_timeout_s"],
-                         robot_cfg["link_timeout_s"], motion_enabled=False)
+                         robot_cfg["link_timeout_s"], motion_enabled=args.drive or robot_cfg["motion_enabled"])
     spray = SprayService(client)
 
     server = WebServer(("127.0.0.1", args.port), camera_service, spray)
-    log.info("Open http://localhost:%d  (camera: %s, detection: %s, robot: %s:%d)  Ctrl+C to quit",
-             args.port, camera.source, "off" if worker is None else backend, host, port)
+    log.info("Open http://localhost:%d  (camera: %s, detection: %s, robot: %s:%d, driving: %s)  Ctrl+C to quit",
+             args.port, camera.source, "off" if worker is None else backend, host, port,
+             "ON" if client.motion_enabled else "off")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
